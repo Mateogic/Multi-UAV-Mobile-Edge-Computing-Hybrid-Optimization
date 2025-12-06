@@ -89,9 +89,6 @@ class MADDPG(MARLModel):
             soft_update(self.target_actors[agent_idx], self.actors[agent_idx], config.UPDATE_FACTOR)
             soft_update(self.target_critics[agent_idx], self.critics[agent_idx], config.UPDATE_FACTOR)
 
-        for n in self.noise:
-            n.decay()
-
     def _init_target_networks(self) -> None:
         for actor, target_actor in zip(self.actors, self.target_actors):
             target_actor.load_state_dict(actor.state_dict())

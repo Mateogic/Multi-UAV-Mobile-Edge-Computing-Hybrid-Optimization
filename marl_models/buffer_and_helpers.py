@@ -53,11 +53,10 @@ class RolloutBuffer:
 
         self.step: int = 0
 
-    def add(self, state: np.ndarray, obs: np.ndarray, actions: np.ndarray, log_probs: np.ndarray, rewards: list[float], done: bool, value: np.ndarray) -> None:
+    def add(self, state: np.ndarray, obs: np.ndarray, actions: np.ndarray, log_probs: np.ndarray, rewards: list[float], done: bool, values: np.ndarray) -> None:
         if self.step >= self.buffer_size:
             raise ValueError("Rollout buffer overflow")
         dones: np.ndarray = np.array([done] * config.NUM_UAVS)
-        values: np.ndarray = np.array([value] * config.NUM_UAVS)
         self.states[self.step] = state
         self.observations[self.step] = obs
         self.actions[self.step] = actions
@@ -93,6 +92,10 @@ class RolloutBuffer:
         advantages: np.ndarray = self.advantages.reshape(-1)
         returns: np.ndarray = self.returns.reshape(-1)
         values: np.ndarray = self.values.reshape(-1)
+        # Create agent indices array to track which agent each sample belongs to
+        # When we reshape (buffer_size, num_agents) to (buffer_size * num_agents,)
+        # the pattern is: [agent0, agent1, ..., agentN, agent0, agent1, ..., agentN, ...]
+        agent_indices: np.ndarray = np.tile(np.arange(self.num_agents), self.buffer_size)
 
         indices: np.ndarray = np.random.permutation(num_samples)
 
@@ -108,6 +111,7 @@ class RolloutBuffer:
                 "advantages": torch.as_tensor(advantages[batch_indices], device=self.device),
                 "returns": torch.as_tensor(returns[batch_indices], device=self.device),
                 "old_values": torch.as_tensor(values[batch_indices], device=self.device),
+                "agent_indices": torch.as_tensor(agent_indices[batch_indices], device=self.device),
             }
 
     def clear(self) -> None:

@@ -3,6 +3,9 @@ import numpy as np
 # Training Parameters
 MODEL: str = "mappo"  # options: 'maddpg', 'matd3', 'mappo', 'masac', 'random'
 SEED: int = 1234  # random seed for reproducibility
+
+# Initialize random state for config parameters to ensure reproducibility
+_config_rng = np.random.RandomState(SEED)
 STEPS_PER_EPISODE: int = 1000  # total T
 LOG_FREQ: int = 10  # episodes
 IMG_FREQ: int = 100  # steps
@@ -22,8 +25,8 @@ UE_MAX_WAIT_TIME: int = 10  # in time slots
 # UAV Parameters
 UAV_ALTITUDE: int = 100  # H in meters
 UAV_SPEED: int = 30  # v^UAV in m/s
-UAV_STORAGE_CAPACITY: np.ndarray = np.random.choice(np.arange(5 * 10**6, 20 * 10**6, 10**6), size=NUM_UAVS)  # S_u in bytes
-UAV_COMPUTING_CAPACITY: np.ndarray = np.random.choice(np.arange(5 * 10**9, 20 * 10**9, 10**9), size=NUM_UAVS)  # F_u in cycles/sec
+UAV_STORAGE_CAPACITY: np.ndarray = _config_rng.choice(np.arange(5 * 10**6, 20 * 10**6, 10**6), size=NUM_UAVS)  # S_u in bytes
+UAV_COMPUTING_CAPACITY: np.ndarray = _config_rng.choice(np.arange(5 * 10**9, 20 * 10**9, 10**9), size=NUM_UAVS)  # F_u in cycles/sec
 UAV_SENSING_RANGE: float = 300.0  # R^sense in meters
 UAV_COVERAGE_RADIUS: float = 100.0  # R in meters
 MIN_UAV_SEPARATION: float = 200.0  # d_min in meters
@@ -48,8 +51,8 @@ POWER_HOVER: float = 80.0  # P_hover in Watts
 NUM_SERVICES: int = 50  # S
 NUM_CONTENTS: int = 100  # K
 NUM_FILES: int = NUM_SERVICES + NUM_CONTENTS  # S + K
-CPU_CYCLES_PER_BYTE: np.ndarray = np.random.randint(2000, 4000, size=NUM_SERVICES)  # omega_s_m
-FILE_SIZES: np.ndarray = np.random.randint(10**5, 5 * 10**5, size=NUM_FILES)  # in bytes
+CPU_CYCLES_PER_BYTE: np.ndarray = _config_rng.randint(2000, 4000, size=NUM_SERVICES)  # omega_s_m
+FILE_SIZES: np.ndarray = _config_rng.randint(10**5, 5 * 10**5, size=NUM_FILES)  # in bytes
 MIN_INPUT_SIZE: int = 1 * 10**5  # in bytes
 MAX_INPUT_SIZE: int = 5 * 10**5  # in bytes
 ZIPF_BETA: float = 0.6  # beta^Zipf
@@ -72,7 +75,7 @@ BANDWIDTH_BACKHAUL: int = 40 * 10**6  # B^backhaul in Hz
 ALPHA_1 = 8.0  # weightage for latency
 ALPHA_2 = 1.0  # weightage for energy
 ALPHA_3 = 4.0  # weightage for fairness
-REWARD_SCALING_FACTOR: float = 0.01  # scaling factor for rewards
+REWARD_SCALING_FACTOR: float = 0.1  # scaling factor for rewards (increased from 0.01 to avoid gradient vanishing)
 
 OBS_DIM_SINGLE: int = 2 + NUM_FILES + (MAX_UAV_NEIGHBORS * (2 + NUM_FILES)) + (MAX_ASSOCIATED_UES * (2 + 3))
 # own state: pos (2) + cache (NUM_FILES) + Neighbors: pos (2) + cache (NUM_FILES) + UEs: pos (2) + request_tuple (3)
@@ -85,7 +88,7 @@ ACTOR_LR: float = 3e-4
 CRITIC_LR: float = 3e-4
 DISCOUNT_FACTOR: float = 0.99  # gamma
 UPDATE_FACTOR: float = 0.01  # tau
-MAX_GRAD_NORM: float = 0.5  # maximum norm for gradient clipping to prevent exploding gradients
+MAX_GRAD_NORM: float = 5.0  # maximum norm for gradient clipping to prevent exploding gradients
 LOG_STD_MAX: float = 2  # maximum log standard deviation for stochastic policies
 LOG_STD_MIN: float = -20  # minimum log standard deviation for stochastic policies
 EPSILON: float = 1e-9  # small value to prevent division by zero
@@ -102,7 +105,7 @@ MIN_NOISE_SCALE: float = 0.01
 NOISE_DECAY_RATE: float = 0.995
 
 # MATD3 Specific Hyperparameters
-POLICY_UPDATE_FREQ: int = 2  # delayed policy update frequency
+POLICY_UPDATE_FREQ: int = 2  # delayed policy update frequency (TD3 typically uses 2)
 TARGET_POLICY_NOISE: float = 0.2  # standard deviation of target policy smoothing noise.
 NOISE_CLIP: float = 0.5  # range to clip target policy smoothing noise
 
@@ -112,6 +115,7 @@ PPO_GAE_LAMBDA: float = 0.95  # lambda parameter for GAE
 PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data
 PPO_BATCH_SIZE: int = 64  # size of mini-batches to use during the update step
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
+PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
 PPO_ENTROPY_COEF: float = 0.01  # coefficient for the entropy bonus to encourage exploration
 
 # MASAC Specific Hyperparameters

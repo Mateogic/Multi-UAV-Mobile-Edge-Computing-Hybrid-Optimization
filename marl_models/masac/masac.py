@@ -30,7 +30,8 @@ class MASAC(MARLModel):
         self.critic_2_optimizers: list[torch.optim.Adam] = [torch.optim.Adam(critic.parameters(), lr=config.CRITIC_LR) for critic in self.critics_2]
 
         # Automatic Entropy Tuning
-        self.target_entropy: float = -torch.prod(torch.Tensor((action_dim,))).item()  # Heuristic: -|A|
+        # Use a more conservative target entropy: -dim(A) is the standard heuristic
+        self.target_entropy: float = -float(action_dim)
         self.log_alphas: list[torch.Tensor] = [torch.zeros(1, requires_grad=True, device=device) for _ in range(num_agents)]
         self.alpha_optimizers: list[torch.optim.Adam] = [torch.optim.Adam([log_alpha], lr=config.ALPHA_LR) for log_alpha in self.log_alphas]
 
@@ -42,8 +43,10 @@ class MASAC(MARLModel):
                 if exploration:
                     action, _ = self.actors[i].sample(obs_tensor)
                 else:
-                    # For testing, use the deterministic mean of the distribution
-                    mean, _ = self.actors[i](obs_tensor)
+                    # For testing, use the mean of the distribution (deterministic policy)
+                    # Note: sample() already applies tanh, so for consistency we do the same
+                    mean, log_std = self.actors[i](obs_tensor)
+                    # Use mean of pre-tanh distribution, then apply tanh (consistent with training)
                     action = torch.tanh(mean)
                 actions.append(action.squeeze(0).cpu().numpy())
         return np.array(actions)
@@ -93,8 +96,9 @@ class MASAC(MARLModel):
             # Compute loss for both critics
             current_q1: torch.Tensor = self.critics_1[agent_idx](obs_flat, actions_flat)
             current_q2: torch.Tensor = self.critics_2[agent_idx](obs_flat, actions_flat)
-            critic_1_loss: torch.Tensor = F.mse_loss(current_q1, y)
-            critic_2_loss: torch.Tensor = F.mse_loss(current_q2, y)
+            # Use Huber loss for more stable training with outliers
+            critic_1_loss: torch.Tensor = F.smooth_l1_loss(current_q1, y)
+            critic_2_loss: torch.Tensor = F.smooth_l1_loss(current_q2, y)
 
             # Update critic 1
             self.critic_1_optimizers[agent_idx].zero_grad()
@@ -109,21 +113,27 @@ class MASAC(MARLModel):
             self.critic_2_optimizers[agent_idx].step()
 
             # Update Actor and Alpha
+            # Sample new actions for all agents to reduce bias and get more accurate Q-values
+            # This is the standard approach in multi-agent SAC for better convergence
             pred_actions_list: list[torch.Tensor] = []
-            pred_log_probs_list: list[torch.Tensor] = []
+            agent_log_prob: torch.Tensor = None
             for i in range(self.num_agents):
-                pred_action, pred_log_prob = self.actors[i].sample(obs_tensor[:, i, :])
-                pred_actions_list.append(pred_action)
-                pred_log_probs_list.append(pred_log_prob)
+                if i == agent_idx:
+                    pred_action, agent_log_prob = self.actors[i].sample(obs_tensor[:, i, :])
+                    pred_actions_list.append(pred_action)
+                else:
+                    with torch.no_grad():
+                        other_action, _ = self.actors[i].sample(obs_tensor[:, i, :])
+                    pred_actions_list.append(other_action.detach())
 
             pred_actions_flat: torch.Tensor = torch.cat(pred_actions_list, dim=1)
-            agent_log_prob: torch.Tensor = pred_log_probs_list[agent_idx]
 
             q1_pred: torch.Tensor = self.critics_1[agent_idx](obs_flat, pred_actions_flat)
             q2_pred: torch.Tensor = self.critics_2[agent_idx](obs_flat, pred_actions_flat)
             min_q_pred: torch.Tensor = torch.min(q1_pred, q2_pred)
 
-            actor_loss: torch.Tensor = (alpha.detach() * agent_log_prob - min_q_pred).mean()
+            # Standard SAC actor loss: maximize Q value while minimizing entropy
+            actor_loss: torch.Tensor = (agent_log_prob * alpha.detach() - min_q_pred).mean()
             self.actor_optimizers[agent_idx].zero_grad()
             actor_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actors[agent_idx].parameters(), config.MAX_GRAD_NORM)
@@ -158,7 +168,7 @@ class MASAC(MARLModel):
                     "critic_2": self.critics_2[i].state_dict(),
                     "target_critic_1": self.target_critics_1[i].state_dict(),
                     "target_critic_2": self.target_critics_2[i].state_dict(),
-                    "log_alpha": self.log_alphas[i].item(),
+                    "log_alpha": self.log_alphas[i].detach().cpu().item(),
                     "actor_optimizer": self.actor_optimizers[i].state_dict(),
                     "critic_1_optimizer": self.critic_1_optimizers[i].state_dict(),
                     "critic_2_optimizer": self.critic_2_optimizers[i].state_dict(),
@@ -181,9 +191,12 @@ class MASAC(MARLModel):
             self.critics_2[i].load_state_dict(checkpoint["critic_2"])
             self.target_critics_1[i].load_state_dict(checkpoint["target_critic_1"])
             self.target_critics_2[i].load_state_dict(checkpoint["target_critic_2"])
-            self.log_alphas[i] = torch.tensor(checkpoint["log_alpha"], requires_grad=True, device=self.device)
+            # Properly restore log_alpha - directly update the existing tensor's data
+            # This preserves requires_grad and the optimizer's reference to it
+            with torch.no_grad():
+                self.log_alphas[i].copy_(torch.tensor([checkpoint["log_alpha"]], device=self.device))
+            # Load optimizer states after the parameter is restored
             self.actor_optimizers[i].load_state_dict(checkpoint["actor_optimizer"])
             self.critic_1_optimizers[i].load_state_dict(checkpoint["critic_1_optimizer"])
             self.critic_2_optimizers[i].load_state_dict(checkpoint["critic_2_optimizer"])
-            self.alpha_optimizers[i] = torch.optim.Adam([self.log_alphas[i]], lr=config.ALPHA_LR)
             self.alpha_optimizers[i].load_state_dict(checkpoint["alpha_optimizer"])

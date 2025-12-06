@@ -89,8 +89,9 @@ class MATD3(MARLModel):
             # Update both critic networks
             current_q1: torch.Tensor = self.critics_1[agent_idx](obs_flat, actions_flat)
             current_q2: torch.Tensor = self.critics_2[agent_idx](obs_flat, actions_flat)
-            critic_1_loss: torch.Tensor = F.mse_loss(current_q1, y)
-            critic_2_loss: torch.Tensor = F.mse_loss(current_q2, y)
+            # Use Huber loss for more stable training with outliers
+            critic_1_loss: torch.Tensor = F.smooth_l1_loss(current_q1, y)
+            critic_2_loss: torch.Tensor = F.smooth_l1_loss(current_q2, y)
 
             self.critic_1_optimizers[agent_idx].zero_grad()
             critic_1_loss.backward()
@@ -105,11 +106,17 @@ class MATD3(MARLModel):
         # Delayed Policy and Target Network Updates
         if self.update_counter % config.POLICY_UPDATE_FREQ == 0:
             for agent_idx in range(self.num_agents):
-                # Update Actor
-                # The actor loss is calculated using only the first critic
-                pred_actions_tensor: torch.Tensor = actions_tensor.detach().clone()
-                pred_actions_tensor[:, agent_idx, :] = self.actors[agent_idx](obs_tensor[:, agent_idx, :])
-                pred_actions_flat: torch.Tensor = pred_actions_tensor.reshape(batch_size, -1)
+                # Update Actor using fresh actions from all current actors; only current agent keeps gradients
+                updated_actions: list[torch.Tensor] = []
+                for i in range(self.num_agents):
+                    if i == agent_idx:
+                        updated_action = self.actors[i](obs_tensor[:, i, :])
+                    else:
+                        with torch.no_grad():
+                            updated_action = self.actors[i](obs_tensor[:, i, :])
+                    updated_actions.append(updated_action if i == agent_idx else updated_action.detach())
+
+                pred_actions_flat: torch.Tensor = torch.cat(updated_actions, dim=1)
 
                 actor_loss: torch.Tensor = -self.critics_1[agent_idx](obs_flat, pred_actions_flat).mean()
                 self.actor_optimizers[agent_idx].zero_grad()
@@ -121,9 +128,6 @@ class MATD3(MARLModel):
                 soft_update(self.target_actors[agent_idx], self.actors[agent_idx], config.UPDATE_FACTOR)
                 soft_update(self.target_critics_1[agent_idx], self.critics_1[agent_idx], config.UPDATE_FACTOR)
                 soft_update(self.target_critics_2[agent_idx], self.critics_2[agent_idx], config.UPDATE_FACTOR)
-
-            for n in self.noise:
-                n.decay()
 
     def _init_target_networks(self) -> None:
         for actor, target_actor in zip(self.actors, self.target_actors):

@@ -41,7 +41,8 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
                 plot_snapshot(env, update, step, logger.log_dir, "update", logger.timestamp)
 
             obs_arr: np.ndarray = np.array(obs)
-            actions, log_probs, value = model.get_action_and_value(obs_arr, state)
+            raw_actions, log_probs, values = model.get_action_and_value(obs_arr, state)
+            actions: np.ndarray = np.clip(raw_actions, -1.0, 1.0)
 
             next_obs, rewards, (total_latency, total_energy, jfi) = env.step(actions)
             # update_trajectories(env)  # tracking code, comment if not needed
@@ -50,7 +51,8 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             # We want to bootstrap from the next state's value.
             # Only use done=True if the episode terminated due to failure/completion, not timeout.
             done: bool = False 
-            buffer.add(state, obs_arr, actions, log_probs, rewards, done, value)
+            # Store raw actions so PPO log_prob computation remains consistent
+            buffer.add(state, obs_arr, raw_actions, log_probs, rewards, done, values)
 
             obs = next_obs
             state = next_state
@@ -61,10 +63,9 @@ def train_on_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: in
             rollout_fairness = jfi
 
         with torch.no_grad():
-            _, _, last_value = model.get_action_and_value(np.array(obs), state)
-            last_values_arr: np.ndarray = np.array([last_value] * config.NUM_UAVS)
+            _, _, last_values = model.get_action_and_value(np.array(obs), state)
 
-        buffer.compute_returns_and_advantages(last_values_arr, config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
+        buffer.compute_returns_and_advantages(last_values, config.DISCOUNT_FACTOR, config.PPO_GAE_LAMBDA)
 
         for _ in range(config.PPO_EPOCHS):
             for batch in buffer.get_batches(config.PPO_BATCH_SIZE):
@@ -129,6 +130,11 @@ def train_off_policy(env: Env, model: MARLModel, logger: Logger, num_episodes: i
             episode_fairness = jfi
             if done:
                 break
+
+        # Decay exploration noise at the end of each episode (for MATD3/MADDPG)
+        if hasattr(model, 'noise'):
+            for n in model.noise:
+                n.decay()
 
         episode_log.append(episode_reward, episode_latency, episode_energy, episode_fairness)
         if episode % config.LOG_FREQ == 0:

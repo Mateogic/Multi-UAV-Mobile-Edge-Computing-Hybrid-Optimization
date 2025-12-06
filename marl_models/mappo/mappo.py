@@ -14,7 +14,7 @@ class MAPPO(MARLModel):
 
         # Create networks
         self.actors: ActorNetwork = ActorNetwork(obs_dim, action_dim).to(device)
-        self.critics: CriticNetwork = CriticNetwork(state_dim).to(device)
+        self.critics: CriticNetwork = CriticNetwork(state_dim, num_agents).to(device)
 
         # Create optimizers
         self.actor_optimizer: torch.optim.Adam = torch.optim.Adam(self.actors.parameters(), lr=config.ACTOR_LR)
@@ -30,24 +30,25 @@ class MAPPO(MARLModel):
                 actions = dist.mean  # Deterministic actions for evaluation
 
         # Clip actions to be within the valid range [-1, 1]
+        # Note: PPO uses unbounded Gaussian, then clips. This is correct approach.
         return np.clip(actions.cpu().numpy(), -1.0, 1.0)
 
     def get_action_and_value(self, obs: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Sample raw actions for PPO; caller is responsible for clipping before env step."""
         obs_tensor: torch.Tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
         state_tensor: torch.Tensor = torch.as_tensor(state, dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             dist: Normal = self.actors(obs_tensor)
-            actions: torch.Tensor = dist.sample()
+            raw_actions: torch.Tensor = dist.sample()
+            # PPO log_prob must correspond to the raw (unclipped) actions
+            log_probs: torch.Tensor = dist.log_prob(raw_actions).sum(dim=-1)
 
-            # Get the log probability of the sampled actions
-            log_probs: torch.Tensor = dist.log_prob(actions).sum(dim=-1)
+            if state_tensor.dim() == 1:
+                state_tensor = state_tensor.unsqueeze(0)
+            values: torch.Tensor = self.critics(state_tensor).squeeze(0)
 
-            # Get the value of the current state from the critic network
-            values: torch.Tensor = self.critics(state_tensor).squeeze(-1)
-
-        clipped_actions: np.ndarray = np.clip(actions.cpu().numpy(), -1.0, 1.0)
-        return clipped_actions, log_probs.cpu().numpy(), values.cpu().numpy()
+        return raw_actions.cpu().numpy(), log_probs.cpu().numpy(), values.cpu().numpy()
 
     def update(self, batch: ExperienceBatch) -> None:
         assert isinstance(batch, dict), "MAPPO expects OnPolicyExperienceBatch (dict)"
@@ -58,14 +59,21 @@ class MAPPO(MARLModel):
         returns_batch: torch.Tensor = batch["returns"]
         states_batch: torch.Tensor = batch["states"]
         old_values_batch: torch.Tensor = batch["old_values"]
+        agent_indices_batch: torch.Tensor = batch["agent_indices"]
 
-        # Normalize advantages
+        # Normalize advantages with clipping for numerical stability
         advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
+        advantages_batch = torch.clamp(advantages_batch, -10.0, 10.0)
 
         # Critic Loss
-        values: torch.Tensor = self.critics(states_batch).squeeze(-1)
-        # Value clipping
-        values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_CLIP_EPS, config.PPO_CLIP_EPS)
+        # The states_batch contains repeated states for each agent after shuffling.
+        # We use agent_indices_batch to correctly extract the value for each agent.
+        batch_size = states_batch.shape[0]
+        values_all: torch.Tensor = self.critics(states_batch)  # Shape: (batch_size, num_agents)
+        # Extract the value for the corresponding agent using the tracked indices
+        values: torch.Tensor = values_all[torch.arange(batch_size, device=values_all.device), agent_indices_batch]
+        # Value clipping - apply clipping to the extracted values
+        values_clipped: torch.Tensor = old_values_batch + torch.clamp(values - old_values_batch, -config.PPO_VALUE_CLIP_EPS, config.PPO_VALUE_CLIP_EPS)
         vf_loss1: torch.Tensor = (values - returns_batch).pow(2)
         vf_loss2: torch.Tensor = (values_clipped - returns_batch).pow(2)
         critic_loss: torch.Tensor = 0.5 * torch.max(vf_loss1, vf_loss2).mean()
