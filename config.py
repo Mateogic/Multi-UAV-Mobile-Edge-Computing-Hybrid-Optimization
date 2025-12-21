@@ -15,7 +15,7 @@ TEST_IMG_FREQ: int = 100  # steps (for testing)
 # Simulation Parameters
 MBS_POS: np.ndarray = np.array([500.0, 500.0, 30.0])  # (X_mbs, Y_mbs, Z_mbs) in meters
 NUM_UAVS: int = 10  # U
-NUM_UES: int = 200  # M
+NUM_UES: int = 100  # M
 AREA_WIDTH: int = 1000  # X_max in meters
 AREA_HEIGHT: int = 1000  # Y_max in meters
 TIME_SLOT_DURATION: float = 1.0  # tau in seconds
@@ -26,7 +26,6 @@ UE_MAX_WAIT_TIME: int = 10  # in time slots
 UAV_ALTITUDE: int = 100  # H in meters
 UAV_SPEED: int = 30  # v^UAV in m/s
 UAV_STORAGE_CAPACITY: np.ndarray = _config_rng.choice(np.arange(5 * 10**6, 20 * 10**6, 10**6), size=NUM_UAVS)  # S_u in bytes
-UAV_COMPUTING_CAPACITY: np.ndarray = _config_rng.choice(np.arange(5 * 10**9, 20 * 10**9, 10**9), size=NUM_UAVS)  # F_u in cycles/sec
 UAV_SENSING_RANGE: float = 300.0  # R^sense in meters
 UAV_COVERAGE_RADIUS: float = 100.0  # R in meters
 MIN_UAV_SEPARATION: float = 200.0  # d_min in meters
@@ -47,16 +46,11 @@ assert MAX_ASSOCIATED_UES >= 1 and MAX_ASSOCIATED_UES <= NUM_UES
 POWER_MOVE: float = 100.0  # P_move in Watts
 POWER_HOVER: float = 80.0  # P_hover in Watts
 
-# Request Parameters
-NUM_SERVICES: int = 50  # S
-NUM_CONTENTS: int = 100  # K
-NUM_FILES: int = NUM_SERVICES + NUM_CONTENTS  # S + K
-CPU_CYCLES_PER_BYTE: np.ndarray = _config_rng.randint(2000, 4000, size=NUM_SERVICES)  # omega_s_m
+# Content Parameters (for caching)
+NUM_CONTENTS: int = 100  # K - number of content files that can be cached
+NUM_FILES: int = NUM_CONTENTS  # Total cacheable files
 FILE_SIZES: np.ndarray = _config_rng.randint(10**5, 5 * 10**5, size=NUM_FILES)  # in bytes
-MIN_INPUT_SIZE: int = 1 * 10**5  # in bytes
-MAX_INPUT_SIZE: int = 5 * 10**5  # in bytes
-ZIPF_BETA: float = 0.6  # beta^Zipf
-K_CPU: float = 1e-27  # CPU capacitance coefficient
+ZIPF_BETA: float = 0.6  # beta^Zipf for content popularity
 
 # Caching Parameters
 T_CACHE_UPDATE_INTERVAL: int = 10  # T_cache
@@ -95,7 +89,7 @@ EPSILON: float = 1e-9  # small value to prevent division by zero
 
 # Off-policy algorithm hyperparameters
 REPLAY_BUFFER_SIZE: int = 10**6  # B
-REPLAY_BATCH_SIZE: int = 256  # minibatch size (increased from 64 for better GPU utilization)
+REPLAY_BATCH_SIZE: int = 128  # minibatch size (increased from 64 for better GPU utilization)
 INITIAL_RANDOM_STEPS: int = 5000  # steps of random actions for exploration
 LEARN_FREQ: int = 5  # steps to learn after
 
@@ -113,7 +107,7 @@ NOISE_CLIP: float = 0.5  # range to clip target policy smoothing noise
 PPO_ROLLOUT_LENGTH: int = 4096  # number of steps to collect per rollout before updating (increased for better GPU utilization)
 PPO_GAE_LAMBDA: float = 0.95  # lambda parameter for GAE
 PPO_EPOCHS: int = 10  # number of epochs to run on the collected rollout data
-PPO_BATCH_SIZE: int = 512  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
+PPO_BATCH_SIZE: int = 256  # size of mini-batches to use during the update step (increased from 64 for better GPU utilization)
 PPO_CLIP_EPS: float = 0.2  # clipping parameter (epsilon) for the PPO surrogate objective
 PPO_VALUE_CLIP_EPS: float = 0.2  # clipping parameter for value function (can be same or different from policy clip)
 PPO_ENTROPY_COEF: float = 0.01  # coefficient for the entropy bonus to encourage exploration

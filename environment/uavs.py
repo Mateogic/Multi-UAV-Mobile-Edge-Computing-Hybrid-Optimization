@@ -3,15 +3,7 @@ from environment.user_equipments import UE
 from environment import comm_model as comms
 import config
 import numpy as np
-# 模拟无人机（UAV）在移动边缘计算环境中的行为。它管理 UAV 的位置、缓存、通信、能量消耗和请求处理。
-
-def _get_computing_latency_and_energy(uav: UAV, cpu_cycles: int) -> tuple[float, float]:
-    """Calculate computing latency and energy for a UAV processing request."""
-    assert uav._current_service_request_count != 0
-    computing_capacity_per_request: float = config.UAV_COMPUTING_CAPACITY[uav.id] / uav._current_service_request_count
-    latency: float = cpu_cycles / computing_capacity_per_request
-    energy: float = config.K_CPU * cpu_cycles * (computing_capacity_per_request**2)
-    return latency, energy
+# 模拟无人机（UAV）作为空中基站提供通信保障服务。它管理 UAV 的位置、缓存、通信、能量消耗和内容请求处理。
 
 
 def _try_add_file_to_cache(uav: UAV, file_id: int) -> None:
@@ -30,7 +22,6 @@ class UAV:
         self._current_covered_ues: list[UE] = []
         self._neighbors: list[UAV] = []
         self._current_collaborator: UAV | None = None
-        self._current_service_request_count: int = 0
         self._energy_current_slot: float = 0.0  # Energy consumed for this time slot
         self.collision_violation: bool = False  # Track if UAV has violated minimum separation
         self.boundary_violation: bool = False  # Track if UAV has gone out of bounds
@@ -67,7 +58,6 @@ class UAV:
         self._current_covered_ues = []
         self._neighbors = []
         self._current_collaborator = None
-        self._current_service_request_count = 0
         self._current_requested_files = np.zeros(config.NUM_FILES, dtype=bool)
         self._freq_counts = np.zeros(config.NUM_FILES)
         self._energy_current_slot = 0.0
@@ -146,25 +136,17 @@ class UAV:
     def set_freq_counts(self) -> None:
         """Set the request count for current slot based on cache availability."""
         for ue in self._current_covered_ues:
-            req_type, _, req_id = ue.current_request
+            _, _, req_id = ue.current_request
             self._freq_counts[req_id] += 1
-            if self.cache[req_id]:
-                if req_type == 0:
-                    self._current_service_request_count += 1
-            elif self._current_collaborator:
+            if not self.cache[req_id] and self._current_collaborator:
                 self._current_collaborator._freq_counts[req_id] += 1
-                if req_type == 0 and self._current_collaborator.cache[req_id]:
-                    self._current_collaborator._current_service_request_count += 1
 
     def process_requests(self) -> None:
-        """Process requests from UEs covered by this UAV."""
+        """Process content requests from UEs covered by this UAV."""
         self._working_cache = self.cache.copy()
         for ue in self._current_covered_ues:
             ue_uav_rate = comms.calculate_ue_uav_rate(comms.calculate_channel_gain(ue.pos, self.pos), len(self._current_covered_ues))
-            if ue.current_request[0] == 0:  # Service Request
-                self._process_service_request(ue, ue_uav_rate)
-            else:  # Content Request
-                self._process_content_request(ue, ue_uav_rate)
+            self._process_content_request(ue, ue_uav_rate)
 
     def _set_rates(self) -> None:
         """Set communication rates for UAV-MBS and UAV-UAV links."""
@@ -172,42 +154,9 @@ class UAV:
         if self._current_collaborator:
             self._uav_uav_rate = comms.calculate_uav_uav_rate(comms.calculate_channel_gain(self.pos, self._current_collaborator.pos))
 
-    def _process_service_request(self, ue: UE, ue_uav_rate: float) -> None:
-        """Process a service request from a UE."""
-        _, req_size, req_id = ue.current_request
-        assert req_id < config.NUM_SERVICES
-
-        ue_assoc_uav_latency = req_size / ue_uav_rate
-        cpu_cycles: int = config.CPU_CYCLES_PER_BYTE[req_id] * req_size
-
-        if self.cache[req_id]:
-            # Serve locally
-            comp_latency, comp_energy = _get_computing_latency_and_energy(self, cpu_cycles)
-            ue.latency_current_request = ue_assoc_uav_latency + comp_latency
-            self._energy_current_slot += comp_energy
-        elif self._current_collaborator:
-            uav_uav_latency = req_size / self._uav_uav_rate
-            if self._current_collaborator.cache[req_id]:
-                # Served by collaborator
-                comp_latency, comp_energy = _get_computing_latency_and_energy(self._current_collaborator, cpu_cycles)
-                ue.latency_current_request = ue_assoc_uav_latency + uav_uav_latency + comp_latency
-                self._current_collaborator._energy_current_slot += comp_energy
-            else:
-                # Served by MBS through collaborator
-                uav_mbs_latency = req_size / self._current_collaborator._uav_mbs_rate
-                ue.latency_current_request = ue_assoc_uav_latency + uav_uav_latency + uav_mbs_latency
-                _try_add_file_to_cache(self._current_collaborator, req_id)
-            _try_add_file_to_cache(self, req_id)
-        else:
-            # Offload to MBS directly
-            uav_mbs_latency = req_size / self._uav_mbs_rate
-            ue.latency_current_request = ue_assoc_uav_latency + uav_mbs_latency
-            _try_add_file_to_cache(self, req_id)
-
     def _process_content_request(self, ue: UE, ue_uav_rate: float) -> None:
         """Process a content request from a UE."""
         _, _, req_id = ue.current_request
-        assert req_id >= config.NUM_SERVICES
 
         file_size = config.FILE_SIZES[req_id]
         ue_assoc_uav_latency = file_size / ue_uav_rate

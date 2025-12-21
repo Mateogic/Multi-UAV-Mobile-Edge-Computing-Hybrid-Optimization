@@ -2,7 +2,7 @@ from environment.user_equipments import UE
 from environment.uavs import UAV
 import config
 import numpy as np
-# 基于强化学习框架，模拟多无人机（UAV）移动边缘计算环境，管理 UAV、用户设备（UE）和宏基站（MBS）的状态、动作和奖励。
+# 基于强化学习框架，模拟多无人机（UAV）空中基站通信保障环境，管理 UAV、用户设备（UE）和宏基站（MBS）的状态、动作和奖励。
 
 class Env:
     def __init__(self) -> None:
@@ -97,9 +97,12 @@ class Env:
             ues: list[UE] = sorted(uav.current_covered_ues, key=lambda u: float(np.linalg.norm(uav.pos[:2] - u.pos[:2])))[: config.MAX_ASSOCIATED_UES]
             for i, ue in enumerate(ues):
                 delta_pos: np.ndarray = (ue.pos[:2] - uav.pos[:2]) / config.AREA_WIDTH
-                req_type, req_size, req_id = ue.current_request
+                req_type, _, req_id = ue.current_request
                 norm_id: float = float(req_id) / float(config.NUM_FILES)
-                norm_size: float = float(req_size) / float(config.MAX_INPUT_SIZE)
+                # For content requests, use file size as the size indicator
+                file_size: float = float(config.FILE_SIZES[req_id])
+                max_file_size: float = float(np.max(config.FILE_SIZES))
+                norm_size: float = file_size / max_file_size
                 request_info: np.ndarray = np.array([req_type, norm_size, norm_id], dtype=np.float32)
                 ue_states[i, :] = np.concatenate([delta_pos, request_info])
 

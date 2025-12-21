@@ -1,33 +1,21 @@
 import config
 import numpy as np
-# 模拟用户设备（UE）在移动边缘计算环境中的行为。它管理 UE 的位置、请求生成和服务覆盖率。
-# 代码基于随机游走模型（Random Waypoint Model）模拟 UE 移动，并使用 Zipf 分布生成请求。
+# 模拟用户设备（UE）在空中基站通信保障场景中的行为。它管理 UE 的位置、通信需求生成和服务覆盖率。
+# 代码基于随机游走模型（Random Waypoint Model）模拟 UE 移动，并使用 Zipf 分布生成内容请求。
 class UE:
-    service_ids: np.ndarray# 服务文件ID数组，从0到NUM_SERVICES-1
-    content_ids: np.ndarray# 内容文件ID数组，从NUM_SERVICES到NUM_FILES-1
+    content_ids: np.ndarray  # 内容文件ID数组，从0到NUM_FILES-1
     # 基于 Zipf 分布的概率数组，用于偏好热门文件
-    service_zipf_probabilities: np.ndarray
     content_zipf_probabilities: np.ndarray
 
     @classmethod
-    # 初始化 Zipf 分布：计算服务和内容的排名概率（1 / rank^beta），归一化后存储在类变量中。
+    # 初始化 Zipf 分布：计算内容的排名概率（1 / rank^beta），归一化后存储在类变量中。
     # 反映了真实网络流量：少数热门内容占多数请求。
     def initialize_ue_class(cls) -> None:
-        # Service Zipf distribution
-        cls.service_ids = np.arange(0, config.NUM_SERVICES)
-        service_ranks: np.ndarray = np.arange(1, config.NUM_SERVICES + 1)
-        service_zipf_denom: float = np.sum(1 / service_ranks**config.ZIPF_BETA)
-        cls.service_zipf_probabilities = (1 / service_ranks**config.ZIPF_BETA) / service_zipf_denom
-
         # Content Zipf distribution
-        cls.content_ids = np.arange(config.NUM_SERVICES, config.NUM_FILES)
-        # 一个 NumPy 数组，从 1 到 config.NUM_CONTENTS，表示内容的排名（1 为最热门）。
+        cls.content_ids = np.arange(0, config.NUM_FILES)
         content_ranks: np.ndarray = np.arange(1, config.NUM_CONTENTS + 1)
         # config.ZIPF_BETA: Zipf 参数（通常 > 0），控制分布偏斜度（值越大，热门文件概率越高）。
-        # 1 / content_ranks**config.ZIPF_BETA: 计算每个排名的未归一化概率权重（Zipf 公式：概率 ∝ 1 / rank^beta）。
-        # content_zipf_denom: 这些权重的总和（使用 np.sum 计算），用于归一化。
         content_zipf_denom: float = np.sum(1 / content_ranks**config.ZIPF_BETA)
-        # cls.content_zipf_probabilities: 归一化后的概率数组（每个权重除以总和），确保总和为 1。用于 np.random.choice 选择内容 ID，模拟用户偏好热门文件。
         cls.content_zipf_probabilities = (1 / content_ranks**config.ZIPF_BETA) / content_zipf_denom
 
     def __init__(self, ue_id: int) -> None:
@@ -35,8 +23,8 @@ class UE:
         self.id: int = ue_id
         # self.pos: 初始化为一个 NumPy 数组，表示 UE 的位置。x 和 y 坐标在区域宽度和高度范围内随机生成，z 坐标固定为 0（地面）。
         self.pos: np.ndarray = np.array([np.random.uniform(0, config.AREA_WIDTH), np.random.uniform(0, config.AREA_HEIGHT), 0.0])
-        # self.current_request: 一个元组，表示当前请求，格式为 (请求类型, 请求大小, 请求 ID)。初始值为 (0, 0, 0)。请求类型包括服务请求（0）和内容请求（1）。
-        self.current_request: tuple[int, int, int] = (0, 0, 0)  # Request : (req_type, req_size, req_id)
+        # self.current_request: 一个元组，表示当前通信需求，格式为 (req_type, req_size, req_id)。req_type固定为1（内容请求）。
+        self.current_request: tuple[int, int, int] = (1, 0, 0)  # Request : (req_type=1, req_size, req_id)
         # self.latency_current_request: 浮点数，表示当前请求的延迟，初始值为 0.0。
         self.latency_current_request: float = 0.0  # Latency for the current request
         # self.assigned: 布尔值，指示 UE 是否已分配给 UAV，初始值为 False。
@@ -68,21 +56,15 @@ class UE:
             self.pos[:2] += move_vector
 
     def generate_request(self) -> None:
-        """Generates a new request tuple for the current time slot."""
-        # Determine request type: 0=service, 1=content
-        req_type: int = np.random.choice([0, 1])
+        """Generates a new content request (communication demand) for the current time slot."""
+        # All requests are content requests (req_type=1) - representing communication demands
+        req_type: int = 1
 
-        req_id: int = -1
-        # Select file ID based on request type and corresponding Zipf probabilities
-        if req_type == 0:  # Service request
-            req_id = np.random.choice(UE.service_ids, p=UE.service_zipf_probabilities)
-        else:  # Content request
-            req_id = np.random.choice(UE.content_ids, p=UE.content_zipf_probabilities)
+        # Select content ID based on Zipf probabilities (popular content preference)
+        req_id: int = np.random.choice(UE.content_ids, p=UE.content_zipf_probabilities)
 
-        # Determine input data size (L_m(t))
+        # req_size is not used for content requests (file size is determined by FILE_SIZES)
         req_size: int = 0
-        if req_type == 0:
-            req_size = np.random.randint(config.MIN_INPUT_SIZE, config.MAX_INPUT_SIZE)
 
         self.current_request = (req_type, req_size, req_id)
         self.latency_current_request = 0.0
