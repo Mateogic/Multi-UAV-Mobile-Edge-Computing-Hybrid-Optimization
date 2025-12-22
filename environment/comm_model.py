@@ -1,43 +1,127 @@
 import config
 import numpy as np
-# 模拟无人机（UAV）、用户设备（UE）和宏基站（MBS）之间的无线通信
-# 基于自由空间路径损耗模型计算两个位置之间的信道增益
+
 """
-位置坐标 pos 是一个包含3个元素的 numpy 数组，格式为 [x, y, z]：
+空对地信道模型 (Air-to-Ground Channel Model)
+================================================
+实现基于 ITU-R / 3GPP TR 36.777 的视距(LoS)/非视距(NLoS)概率信道模型。
 
-UE设备位置：在 user_equipments.py 中初始化为 [x, y, 0.0]，z坐标固定为0（地面） user_equipments.py:27
-UAV位置：在 uavs.py 中初始化为 [x, y, UAV_ALTITUDE]，z坐标为100米（飞行高度） uavs.py:27
-MBS位置：在 config.py 中定义为 [500.0, 500.0, 30.0]
+模型特点：
+1. LoS概率模型：基于仰角计算视距链路概率
+   P_LoS = 1 / (1 + a * exp(-b * (θ - a)))
+   其中 θ 是仰角（度），a、b 是环境相关参数
 
+2. 平均路径损耗：结合LoS和NLoS的加权平均
+   PL_avg = P_LoS * PL_LoS + (1 - P_LoS) * PL_NLoS
 
-
-是否足够符合真实环境？
-不足之处：
-
-路径损耗过于理想化：自由空间模型假设无障碍传播（直线视距），忽略阴影衰落（shadowing）、多径效应（multipath fading）和地形影响。在城市或室内环境中，信号会因建筑物、反射和散射而显著衰减。
-忽略干扰和噪声：仅考虑 AWGN（加性高斯白噪声），未模拟同频干扰（co-channel interference）、邻频干扰或外部噪声源（如其他设备）。
-静态信道假设：未考虑移动导致的多普勒效应（Doppler shift）、信道时变性或信道状态信息（CSI）的动态更新。
-速率计算简化：香农公式适用于理想信道，但现实中需考虑调制编码方案（MCS）、误码率（BER）和自适应调制（如 OFDM）。
-通信类型局限：仅覆盖 UE-UAV、UAV-MBS 和 UAV-UAV，未考虑地面网络（如 LTE/5G）或卫星链路。
-能量和硬件忽略：未模拟发射机/接收机效率、功率放大器非线性或硬件约束。
-符合程度：在高空 UAV 场景中（视距为主），模型大致合理，但对于地面密集 UE 或复杂环境（如城市），准确性低。适合概念验证，但不适用于精确性能评估。
-
-可以考虑的改进
-更复杂的路径损耗模型：采用 Okumura-Hata 或 ITU-R P.1411 模型，考虑频率、城市类型和高度。
-阴影和快衰落：添加对数正态阴影衰落和 Rayleigh/Rician 快衰落模型。
-干扰管理：模拟同频干扰（e.g., 其他 UAV/UE 的信号）和频率复用。
-动态信道：引入多普勒效应和信道估计，考虑移动速度对速率的影响。
-高级通信技术：支持 MIMO（多输入多输出）、波束赋形或毫米波通信。
-能量效率：计算通信能量消耗（e.g., 基于功率放大器效率）。
-协议栈模拟：添加 MAC 层调度、握手延迟或 QoS 保证。
-环境因素：考虑天气（雨衰）、地形和网络拓扑变化。
-验证与校准：通过实测数据或 NS-3 等仿真工具验证模型。
+位置坐标格式：[x, y, z] (meters)
+- UE: [x, y, 0.0] - 地面用户
+- UAV: [x, y, UAV_ALTITUDE] - 空中基站
+- MBS: [500.0, 500.0, 30.0] - 宏基站
 """
+
+
+def _calculate_elevation_angle(pos_ground: np.ndarray, pos_aerial: np.ndarray) -> float:
+    """
+    计算从地面点到空中点的仰角（elevation angle）。
+    
+    Args:
+        pos_ground: 地面位置 [x, y, z_ground]
+        pos_aerial: 空中位置 [x, y, z_aerial]
+    
+    Returns:
+        仰角（度），范围 [0, 90]
+    """
+    horizontal_dist = np.sqrt((pos_aerial[0] - pos_ground[0])**2 + (pos_aerial[1] - pos_ground[1])**2)
+    vertical_dist = abs(pos_aerial[2] - pos_ground[2])
+    
+    if horizontal_dist < config.EPSILON:
+        return 90.0  # 正上方
+    
+    # 仰角 = arctan(垂直距离 / 水平距离)
+    elevation_rad = np.arctan(vertical_dist / horizontal_dist)
+    return np.degrees(elevation_rad)
+
+
+def _calculate_los_probability(elevation_angle: float) -> float:
+    """
+    计算视距(LoS)链路概率。
+    基于 ITU-R / 3GPP 模型: P_LoS = 1 / (1 + a * exp(-b * (θ - a)))
+    Args:
+        elevation_angle: 仰角（度）
+    
+    Returns:
+        LoS概率，范围 [0, 1]
+    """
+    a, b = config.LOS_PARAMS.get(config.ENVIRONMENT_TYPE, config.LOS_PARAMS['urban'])
+
+    p_los = 1.0 / (1.0 + a * np.exp(-b * (elevation_angle - a)))
+    return np.clip(p_los, 0.0, 1.0)
+
+def _calculate_path_loss(distance: float) -> float:
+    """
+    计算简化路径损耗 (距离平方模型)。
+    与原模型保持一致，频率相关项已合并到 G_CONSTS_PRODUCT 中。
+    
+    Args:
+        distance: 传播距离（米）
+    
+    Returns:
+        路径损耗（线性值）
+    """
+    return distance ** 2
+
+
 def calculate_channel_gain(pos1: np.ndarray, pos2: np.ndarray) -> float:
-    """Calculates channel gain based on the free-space path loss model."""
-    distance_sq: float = np.sum((pos1 - pos2) ** 2)# 欧几里得距离平方
-    # 天线增益常数乘积 / (距离平方 + 一个很小的数防止除零)
-    return (config.G_CONSTS_PRODUCT) / (distance_sq + config.EPSILON)
+    """
+    计算两点之间的信道增益，考虑LoS/NLoS概率。
+    
+    对于空对地链路(UE-UAV)，使用概率信道模型：
+    - 计算仰角和LoS概率
+    - 综合LoS和NLoS路径损耗
+    
+    对于空对空链路(UAV-UAV)和UAV-MBS链路，假设为LoS。
+    
+    Args:
+        pos1: 第一个位置 [x, y, z]
+        pos2: 第二个位置 [x, y, z]
+    
+    Returns:
+        信道增益（线性值）
+    """
+    distance = np.sqrt(np.sum((pos1 - pos2) ** 2))
+    
+    # 判断链路类型：如果其中一个在地面(z≈0)，则为空对地链路
+    is_air_to_ground = (pos1[2] < 1.0) or (pos2[2] < 1.0)
+    
+    if is_air_to_ground:
+        # 确定地面点和空中点
+        if pos1[2] < pos2[2]:
+            pos_ground, pos_aerial = pos1, pos2
+        else:
+            pos_ground, pos_aerial = pos2, pos1
+        
+        # 计算仰角和LoS概率
+        elevation_angle = _calculate_elevation_angle(pos_ground, pos_aerial)
+        p_los = _calculate_los_probability(elevation_angle)
+        
+        # 计算路径损耗
+        path_loss = _calculate_path_loss(distance)
+        pl_los = path_loss  # LoS路径损耗
+        
+        # NLoS额外损耗（从dB转换为线性）
+        nlos_factor = 10 ** (config.NLOS_ADDITIONAL_LOSS_DB / 10)
+        pl_nlos = path_loss * nlos_factor  # NLoS路径损耗
+        
+        # 平均路径损耗 (概率加权)
+        avg_path_loss = p_los * pl_los + (1 - p_los) * pl_nlos
+    else:
+        # 空对空链路或UAV-MBS：假设为LoS
+        avg_path_loss = _calculate_path_loss(distance)
+    
+    # 信道增益 = 天线增益 / 路径损耗
+    channel_gain = config.G_CONSTS_PRODUCT / (avg_path_loss + config.EPSILON)
+    return channel_gain
 
 
 def calculate_ue_uav_rate(channel_gain: float, num_associated_ues: int) -> float:

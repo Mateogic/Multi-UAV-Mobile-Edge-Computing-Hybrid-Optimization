@@ -1,7 +1,7 @@
 import numpy as np
 
 # Training Parameters
-MODEL: str = "mappo"  # options: 'maddpg', 'matd3', 'mappo', 'masac', 'random'
+MODEL: str = "maddpg"  # options: 'maddpg', 'matd3', 'mappo', 'masac', 'random'
 SEED: int = 1234  # random seed for reproducibility
 
 # Initialize random state for config parameters to ensure reproducibility
@@ -63,6 +63,20 @@ AWGN: float = 1e-13  # sigma^2
 BANDWIDTH_INTER: int = 30 * 10**6  # B^inter in Hz
 BANDWIDTH_EDGE: int = 20 * 10**6  # B^edge in Hz
 BANDWIDTH_BACKHAUL: int = 40 * 10**6  # B^backhaul in Hz
+
+# Air-to-Ground Channel Model Parameters (ITU-R / 3GPP based)
+# Environment types: 'suburban', 'urban', 'dense_urban', 'highrise_urban'
+ENVIRONMENT_TYPE: str = 'urban'
+# LoS probability parameters: P_LoS = 1 / (1 + a * exp(-b * (theta - a)))
+# Parameters for different environments (a, b) from ITU-R P.1410 / 3GPP TR 36.777
+LOS_PARAMS: dict = {
+    'suburban': (4.88, 0.43),       # 郊区：建筑稀疏，LoS概率高
+    'urban': (9.61, 0.16),          # 城市：中等建筑密度
+    'dense_urban': (12.08, 0.11),   # 密集城区：建筑密集
+    'highrise_urban': (27.23, 0.08) # 高层城区：高楼林立，LoS概率低
+}
+# Additional path loss for NLoS (dB) - accounts for shadowing and diffraction
+NLOS_ADDITIONAL_LOSS_DB: float = 10.0  # 非视距额外损耗
 
 # Model Parameters
 
