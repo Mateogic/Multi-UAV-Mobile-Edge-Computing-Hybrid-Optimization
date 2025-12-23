@@ -43,13 +43,15 @@ MAX_ASSOCIATED_UES: int = min(30, NUM_UES // NUM_UAVS + 10)
 assert MAX_UAV_NEIGHBORS >= 1 and MAX_UAV_NEIGHBORS <= NUM_UAVS - 1
 assert MAX_ASSOCIATED_UES >= 1 and MAX_ASSOCIATED_UES <= NUM_UES
 
-POWER_MOVE: float = 100.0  # P_move in Watts
-POWER_HOVER: float = 80.0  # P_hover in Watts
+POWER_MOVE: float = 60.0  # P_move in Watts
+POWER_HOVER: float = 40.0  # P_hover in Watts
 
 # Content Parameters (for caching)
 NUM_CONTENTS: int = 100  # K - number of content files that can be cached
 NUM_FILES: int = NUM_CONTENTS  # Total cacheable files
 FILE_SIZES: np.ndarray = _config_rng.randint(10**5, 5 * 10**5, size=NUM_FILES)  # in bytes
+REQUEST_MSG_SIZE: int = 100  # 请求消息大小 (bytes)，用于上行链路
+BITS_PER_BYTE: int = 8  # 字节转比特的换算系数
 ZIPF_BETA: float = 0.6  # beta^Zipf for content popularity
 
 # Caching Parameters
@@ -58,7 +60,10 @@ GDSF_SMOOTHING_FACTOR: float = 0.5  # beta^gdsf
 
 # Communication Parameters
 G_CONSTS_PRODUCT: float = 2.2846 * 1.42 * 1e-4  # G_0 * g_0
-TRANSMIT_POWER: float = 0.5  # P in Watts
+TRANSMIT_POWER: float = 0.8  # P_uav in Watts (UAV 发射功率)
+MBS_TRANSMIT_POWER: float = 20.0  # P_mbs in Watts (MBS 发射功率，宏基站功率远大于 UAV)
+RECEIVE_POWER: float = 0.1  # P_rx in Watts (UAV 接收功率)
+UE_TRANSMIT_POWER: float = 0.1  # P_ue in Watts (UE 发射功率，用于上行链路)
 AWGN: float = 1e-13  # sigma^2
 BANDWIDTH_INTER: int = 30 * 10**6  # B^inter in Hz
 BANDWIDTH_EDGE: int = 20 * 10**6  # B^edge in Hz

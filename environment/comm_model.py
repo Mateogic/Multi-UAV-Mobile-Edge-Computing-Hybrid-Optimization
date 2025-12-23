@@ -159,22 +159,61 @@ def calculate_channel_gain(pos1: np.ndarray, pos2: np.ndarray,
 
 
 def calculate_ue_uav_rate(channel_gain: float, num_associated_ues: int) -> float:
-    """Calculates data rate between a UE and a UAV."""
+    """Calculates downlink data rate from UAV to UE.
+    
+    下行链路：UAV → UE，使用 OFDMA 多址方式。
+    总功率限制模型：UAV 的总发射功率固定，OFDMA 时每个 UE 分得 1/N 的带宽和功率。
+    """
     assert num_associated_ues != 0
-    bandwidth_per_ue: float = config.BANDWIDTH_EDGE / num_associated_ues# 每个UE分配的带宽
-    # 计算信噪比（发射功率/噪声功率）
-    snr: float = (config.TRANSMIT_POWER * channel_gain) / config.AWGN
-    # 香农公式计算数据速率
+    # OFDMA: 带宽和功率都平分给各 UE
+    bandwidth_per_ue: float = config.BANDWIDTH_EDGE / num_associated_ues
+    power_per_ue: float = config.TRANSMIT_POWER / num_associated_ues
+    snr: float = (power_per_ue * channel_gain) / config.AWGN
     return bandwidth_per_ue * np.log2(1 + snr)
 
 
-def calculate_uav_mbs_rate(channel_gain: float) -> float:
-    """Calculates data rate between a UAV and the MBS."""
+def calculate_ue_uav_uplink_rate(channel_gain: float, num_associated_ues: int) -> float:
+    """Calculates uplink data rate from UE to UAV.
+    
+    上行链路：UE → UAV，使用 UE 发射功率（通常远小于 UAV）。
+    """
+    assert num_associated_ues != 0
+    bandwidth_per_ue: float = config.BANDWIDTH_EDGE / num_associated_ues
+    snr: float = (config.UE_TRANSMIT_POWER * channel_gain) / config.AWGN
+    return bandwidth_per_ue * np.log2(1 + snr)
+
+
+def calculate_uav_mbs_uplink_rate(channel_gain: float) -> float:
+    """Calculates uplink data rate from UAV to MBS.
+    
+    上行链路：UAV → MBS，使用 UAV 发射功率。
+    """
     snr: float = (config.TRANSMIT_POWER * channel_gain) / config.AWGN
     return config.BANDWIDTH_BACKHAUL * np.log2(1 + snr)
 
 
-def calculate_uav_uav_rate(channel_gain: float) -> float:
-    """Calculates data rate between two UAVs."""
-    snr: float = (config.TRANSMIT_POWER * channel_gain) / config.AWGN
-    return config.BANDWIDTH_INTER * np.log2(1 + snr)
+def calculate_uav_mbs_downlink_rate(channel_gain: float) -> float:
+    """Calculates downlink data rate from MBS to UAV.
+    
+    下行链路：MBS → UAV，使用 MBS 发射功率（远大于 UAV）。
+    """
+    snr: float = (config.MBS_TRANSMIT_POWER * channel_gain) / config.AWGN
+    return config.BANDWIDTH_BACKHAUL * np.log2(1 + snr)
+
+
+def calculate_uav_uav_rate(channel_gain: float, num_collaborating_uavs: int = 1) -> float:
+    """Calculates data rate between two UAVs.
+    
+    采用频分复用(FDM)：当一个UAV被多个邻居选为协作者时，带宽和功率都需要平分。
+    这符合总功率限制模型：UAV 的总发射功率固定，FDM 时每条链路分得 1/N 的功率。
+    
+    Args:
+        channel_gain: 信道增益
+        num_collaborating_uavs: 需要服务的协作UAV数量（被多少个UAV选为协作者）
+    """
+    assert num_collaborating_uavs >= 1
+    # FDM: 带宽和功率都平分给各链路
+    bandwidth_per_link: float = config.BANDWIDTH_INTER / num_collaborating_uavs
+    power_per_link: float = config.TRANSMIT_POWER / num_collaborating_uavs
+    snr: float = (power_per_link * channel_gain) / config.AWGN
+    return bandwidth_per_link * np.log2(1 + snr)

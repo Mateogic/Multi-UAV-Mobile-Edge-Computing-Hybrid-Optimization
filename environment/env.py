@@ -25,12 +25,18 @@ class Env:
         self._ues = [UE(i) for i in range(config.NUM_UES)]
         self._uavs = [UAV(i) for i in range(config.NUM_UAVS)]
         self._time_step = 0
+        self._prepare_for_next_step()
         return self._get_obs()
 
-    def step(self, actions: np.ndarray, visualize: bool = False) -> tuple[list[np.ndarray], list[float], tuple[float, float, float]]:
+    def step(self, actions: np.ndarray) -> tuple[list[np.ndarray], list[float], tuple[float, float, float]]:
         """Execute one time step of the simulation."""
         self._time_step += 1
 
+        # 1. Process requests using current time slot state
+        # 先初始化所有 UAV 的 working_cache，避免竞态条件
+        # （协作 UAV 可能在请求处理时修改其他 UAV 的 _working_cache）
+        for uav in self._uavs:
+            uav.init_working_cache()
         for uav in self._uavs:
             uav.process_requests()
 
@@ -39,6 +45,12 @@ class Env:
 
         for uav in self._uavs:
             uav.update_ema_and_cache()
+
+        # 2. Execute UAV movement (updates _dist_moved)
+        self._apply_actions_to_env(actions)
+
+        # 3. Calculate energy (flight energy uses _dist_moved, comm energy uses this slot's time)
+        for uav in self._uavs:
             uav.update_energy_consumption()
 
         rewards, metrics = self._get_rewards_and_metrics()
@@ -47,37 +59,68 @@ class Env:
             for uav in self._uavs:
                 uav.gdsf_cache_update()
 
-        # For next time step
+        # 4. Prepare for next time slot
         for ue in self._ues:
             ue.update_position()
 
         for uav in self._uavs:
             uav.reset_for_next_step()
 
-        if visualize:
-            for uav, action in zip(self._uavs, actions):  # only for visualize script
-                uav.update_position(action)
-        else:
-            self._apply_actions_to_env(actions)
-
+        self._prepare_for_next_step()
         next_obs: list[np.ndarray] = self._get_obs()
         return next_obs, rewards, metrics
 
-    def _get_obs(self) -> list[np.ndarray]:
-        """Gets the local observation for each UAV agent."""
-        # For new time step
+    def _prepare_for_next_step(self) -> None:
+        """Prepare environment state for the next time step.
+        
+        This includes:
+        1. Generate UE requests
+        2. Associate UEs to UAVs
+        3. Set UAV requested files and neighbors
+        4. Select collaborators
+        5. Count requesting UAVs for bandwidth allocation
+        6. Set communication rates
+        7. Set frequency counts for caching policy
+        """
+        # 1. Generate requests for all UEs
         for ue in self._ues:
             ue.generate_request()
+        
+        # 2. Associate UEs to UAVs based on coverage
         self._associate_ues_to_uavs()
+        
+        # 3. Set requested files and neighbors for each UAV
         for uav in self._uavs:
             uav.set_current_requested_files()
             uav.set_neighbors(self._uavs)
+        
+        # 4. Select collaborator for each UAV
         for uav in self._uavs:
             uav.select_collaborator()
+        
+        # 5. Count how many UAVs selected each UAV as collaborator (for FDM bandwidth allocation)
+        for uav in self._uavs:
+            if uav.current_collaborator:
+                uav.current_collaborator._num_requesting_uavs += 1
+        
+        # 6. Set communication rates (must be after _num_requesting_uavs is counted)
+        for uav in self._uavs:
+            uav._set_rates()
+        
+        # 7. Set frequency counts for GDSF caching policy
         for uav in self._uavs:
             uav.set_freq_counts()
 
+    def _get_obs(self) -> list[np.ndarray]:
+        """Construct local observation vector for each UAV agent.
+        
+        Observation structure per UAV:
+        - Own state: position (2) + cache (NUM_FILES)
+        - Neighbors: (position (2) + cache (NUM_FILES)) × MAX_UAV_NEIGHBORS
+        - UEs: (position (2) + request_info (3)) × MAX_ASSOCIATED_UES
+        """
         all_obs: list[np.ndarray] = []
+        
         for uav in self._uavs:
             # Part 1: Own state (position and cache status)
             own_pos: np.ndarray = uav.pos[:2] / np.array([config.AREA_WIDTH, config.AREA_HEIGHT])
@@ -99,7 +142,6 @@ class Env:
                 delta_pos: np.ndarray = (ue.pos[:2] - uav.pos[:2]) / config.AREA_WIDTH
                 req_type, _, req_id = ue.current_request
                 norm_id: float = float(req_id) / float(config.NUM_FILES)
-                # For content requests, use file size as the size indicator
                 file_size: float = float(config.FILE_SIZES[req_id])
                 max_file_size: float = float(np.max(config.FILE_SIZES))
                 norm_size: float = file_size / max_file_size

@@ -35,7 +35,40 @@ class UAV:
 
         # Communication rates
         self._uav_uav_rate: float = 0.0
-        self._uav_mbs_rate: float = 0.0
+        self._uav_mbs_uplink_rate: float = 0.0   # UAV → MBS (发送请求)
+        self._uav_mbs_downlink_rate: float = 0.0 # MBS → UAV (接收数据)
+        
+        # 被多少个 UAV 选为协作者（用于 UAV-UAV 带宽分配）
+        self._num_requesting_uavs: int = 0
+        
+        # Communication time tracking for energy calculation (分为发送和接收)
+        # 注意：多用户并行传输（OFDMA），记录的是最大传输时间，不是累加
+        # UE ↔ UAV 链路
+        self._tx_time_ue_uav: float = 0.0      # UAV 发送时间 (UAV→UE 下行数据)
+        self._rx_time_ue_uav: float = 0.0      # UAV 接收时间 (UE→UAV 上行请求)
+        # UAV ↔ UAV 链路（作为请求方时，向协作者发送/接收）- 按协作者ID分组
+        self._tx_time_uav_uav_as_requester: dict[int, float] = {}  # collaborator_id -> tx_time
+        self._rx_time_uav_uav_as_requester: dict[int, float] = {}  # collaborator_id -> rx_time
+        # UAV ↔ UAV 链路（作为协作者时，来自不同请求方的时间，FDM并行）
+        self._tx_time_uav_uav_as_collaborator: dict[int, float] = {}  # requester_id -> tx_time (发数据给请求方)
+        self._rx_time_uav_uav_as_collaborator: dict[int, float] = {}  # requester_id -> rx_time (收请求从请求方)
+        # UAV ↔ MBS 链路
+        self._tx_time_uav_mbs: float = 0.0     # UAV 发送时间 (UAV→MBS 上行请求)
+        self._rx_time_uav_mbs: float = 0.0     # UAV 接收时间 (MBS→UAV 下行数据)
+        
+        # 跨时隙积压时间（上一时隙未完成的传输需要的额外时间）
+        # 这些变量跨时隙保持，只在 episode reset 时清零
+        # 积压也分为发送和接收
+        self._backlog_tx_ue_uav: float = 0.0
+        self._backlog_rx_ue_uav: float = 0.0
+        # UAV-UAV 作为请求方的积压（按协作者ID分组，因为每时隙可能选择不同协作者）
+        self._backlog_tx_uav_uav_as_requester: dict[int, float] = {}  # collaborator_id -> backlog
+        self._backlog_rx_uav_uav_as_requester: dict[int, float] = {}  # collaborator_id -> backlog
+        # UAV-UAV 作为协作者的积压（FDM并行，按请求方ID分组）
+        self._backlog_tx_uav_uav_as_collaborator: dict[int, float] = {}
+        self._backlog_rx_uav_uav_as_collaborator: dict[int, float] = {}
+        self._backlog_tx_uav_mbs: float = 0.0
+        self._backlog_rx_uav_mbs: float = 0.0
         
         # 3D Beamforming: 波束指向 (俯仰角, 方位角)
         self._beam_direction: tuple[float, float] = (0.0, 0.0)
@@ -57,13 +90,30 @@ class UAV:
         return self._current_collaborator
 
     def reset_for_next_step(self) -> None:
-        """Reset UAV state for a new step."""
+        """Reset UAV state for a new time slot.
+        
+        注意：_backlog_* 变量不在这里重置，因为它们是跨时隙的。
+        它们在 episode 开始时通过 UAV.__init__() 初始化为 0。
+        """
         self._current_covered_ues = []
         self._neighbors = []
         self._current_collaborator = None
         self._current_requested_files = np.zeros(config.NUM_FILES, dtype=bool)
         self._freq_counts = np.zeros(config.NUM_FILES)
         self._energy_current_slot = 0.0
+        # 本时隙新增的通信时间（每时隙重置，分为发送和接收）
+        self._tx_time_ue_uav = 0.0
+        self._rx_time_ue_uav = 0.0
+        # UAV-UAV 作为请求方（按协作者ID分组）
+        self._tx_time_uav_uav_as_requester = {}
+        self._rx_time_uav_uav_as_requester = {}
+        # UAV-UAV 作为协作者（FDM并行，按请求方ID分组）
+        self._tx_time_uav_uav_as_collaborator = {}
+        self._rx_time_uav_uav_as_collaborator = {}
+        self._tx_time_uav_mbs = 0.0
+        self._rx_time_uav_mbs = 0.0
+        # 注意：_backlog_* 不重置，跨时隙保持
+        self._num_requesting_uavs = 0  # 重置被选为协作者的计数
         self.collision_violation = False
         self.boundary_violation = False
 
@@ -94,9 +144,12 @@ class UAV:
         self._beam_direction = comms.calculate_beam_direction(self.pos, ue_positions)
 
     def select_collaborator(self) -> None:
-        """Choose a single collaborating UAV from its list of neighbours."""
+        """Choose a single collaborating UAV from its list of neighbours.
+        
+        注意：_set_rates() 已移至 env.py 中统一调用，
+        因为需要先统计所有 UAV 的 _num_requesting_uavs。
+        """
         if not self._neighbors:
-            self._set_rates()
             return
 
         best_collaborators: list[UAV] = []
@@ -115,7 +168,6 @@ class UAV:
         # If only one best collaborator, select it
         if len(best_collaborators) == 1:
             self._current_collaborator = best_collaborators[0]
-            self._set_rates()
             return
 
         # If tie in overlap, select closest one(s)
@@ -137,9 +189,6 @@ class UAV:
         else:
             self._current_collaborator = closest_collaborators[np.random.randint(0, len(closest_collaborators))]
 
-        # Set communication rates once collaborator is selected
-        self._set_rates()
-
     def set_freq_counts(self) -> None:
         """Set the request count for current slot based on cache availability."""
         for ue in self._current_covered_ues:
@@ -148,45 +197,179 @@ class UAV:
             if not self.cache[req_id] and self._current_collaborator:
                 self._current_collaborator._freq_counts[req_id] += 1
 
+    def init_working_cache(self) -> None:
+        """Initialize working cache from current cache state.
+        
+        必须在所有 UAV 的 process_requests() 之前统一调用，
+        避免协作缓存更新时的竞态条件。
+        """
+        self._working_cache = self.cache.copy()
+
     def process_requests(self) -> None:
         """Process content requests from UEs covered by this UAV."""
-        self._working_cache = self.cache.copy()
         for ue in self._current_covered_ues:
             channel_gain = comms.calculate_channel_gain(ue.pos, self.pos, self._beam_direction)
-            ue_uav_rate = comms.calculate_ue_uav_rate(channel_gain, len(self._current_covered_ues))
-            self._process_content_request(ue, ue_uav_rate)
+            num_ues = len(self._current_covered_ues)
+            # 下行速率：UAV → UE，使用 UAV 发射功率
+            downlink_rate = comms.calculate_ue_uav_rate(channel_gain, num_ues)
+            # 上行速率：UE → UAV，使用 UE 发射功率
+            uplink_rate = comms.calculate_ue_uav_uplink_rate(channel_gain, num_ues)
+            self._process_content_request(ue, downlink_rate, uplink_rate)
 
     def _set_rates(self) -> None:
-        """Set communication rates for UAV-MBS and UAV-UAV links."""
-        self._uav_mbs_rate = comms.calculate_uav_mbs_rate(comms.calculate_channel_gain(self.pos, config.MBS_POS))
+        """Set communication rates for UAV-MBS and UAV-UAV links.
+        
+        UAV-MBS 链路区分上下行：
+        - 上行 (UAV→MBS): 使用 UAV 发射功率
+        - 下行 (MBS→UAV): 使用 MBS 发射功率（远大于 UAV）
+        
+        UAV-UAV 链路采用频分复用(FDM)：
+        - 如果一个 UAV 被多个邻居选为协作者，其 UAV-UAV 带宽需要平分
+        - 带宽分割发生在协作者端，请求方端不分割
+        """
+        mbs_channel_gain = comms.calculate_channel_gain(self.pos, config.MBS_POS)
+        self._uav_mbs_uplink_rate = comms.calculate_uav_mbs_uplink_rate(mbs_channel_gain)
+        self._uav_mbs_downlink_rate = comms.calculate_uav_mbs_downlink_rate(mbs_channel_gain)
+        
         if self._current_collaborator:
-            self._uav_uav_rate = comms.calculate_uav_uav_rate(comms.calculate_channel_gain(self.pos, self._current_collaborator.pos))
+            channel_gain = comms.calculate_channel_gain(self.pos, self._current_collaborator.pos)
+            
+            # UAV-UAV 链路速率由协作者的带宽分割决定
+            # 协作者被多个 UAV 选中时，需要将 BANDWIDTH_INTER 平分给各请求方
+            collaborator_load = max(1, self._current_collaborator._num_requesting_uavs)
+            self._uav_uav_rate = comms.calculate_uav_uav_rate(channel_gain, collaborator_load)
 
-    def _process_content_request(self, ue: UE, ue_uav_rate: float) -> None:
-        """Process a content request from a UE."""
+    def _process_content_request(self, ue: UE, ue_uav_downlink_rate: float, ue_uav_uplink_rate: float) -> None:
+        """Process a content request from a UE.
+        
+        通信流程（双向）:
+        1. 上行: UE → UAV (请求消息，UAV 接收)
+        2. 上行: UAV → UAV/MBS (请求转发，UAV 发送)
+        3. 下行: MBS/UAV → UAV (数据返回，UAV 接收)
+        4. 下行: UAV → UE (数据传输，UAV 发送)
+        
+        能耗模型区分发送和接收功率:
+        - 发送：使用 TRANSMIT_POWER
+        - 接收：使用 RECEIVE_POWER
+        """
         _, _, req_id = ue.current_request
 
-        file_size = config.FILE_SIZES[req_id]
-        ue_assoc_uav_latency = file_size / ue_uav_rate
+        # 注意单位转换：FILE_SIZES 和 REQUEST_MSG_SIZE 单位是 bytes，
+        # 而通信速率（香农公式结果）单位是 bits/s，因此需要乘以 8
+        file_size_bits = config.FILE_SIZES[req_id] * config.BITS_PER_BYTE
+        request_size_bits = config.REQUEST_MSG_SIZE * config.BITS_PER_BYTE
+        
+        # === UE ↔ UAV 链路 ===
+        # 上行请求：UE → UAV，UAV 接收
+        ue_uav_request_latency = request_size_bits / ue_uav_uplink_rate
+        # 下行数据：UAV → UE，UAV 发送
+        ue_uav_data_latency = file_size_bits / ue_uav_downlink_rate
+        ue_uav_transmission_time = ue_uav_request_latency + ue_uav_data_latency
+        
+        # 分别记录发送和接收时间（OFDMA 并行取最大值）
+        self._rx_time_ue_uav = max(self._rx_time_ue_uav, ue_uav_request_latency)  # 接收请求
+        self._tx_time_ue_uav = max(self._tx_time_ue_uav, ue_uav_data_latency)      # 发送数据
+        
+        # UE-UAV 链路使用 OFDMA：不同 UE 使用不同子载波，新请求与积压并行处理，无需等待
 
         if self.cache[req_id]:
-            # Serve locally
-            ue.latency_current_request = ue_assoc_uav_latency
+            # Serve locally: 本地缓存命中
+            ue.latency_current_request = ue_uav_transmission_time
         elif self._current_collaborator:
-            uav_uav_latency = file_size / self._uav_uav_rate
+            # === UAV ↔ 协作UAV 链路 ===
+            uav_uav_request_latency = request_size_bits / self._uav_uav_rate
+            uav_uav_data_latency = file_size_bits / self._uav_uav_rate
+            uav_uav_transmission_time = uav_uav_request_latency + uav_uav_data_latency
+            
+            # 该链路的排队等待时间（全双工 + 本时隙内排队）
+            collaborator_id = self._current_collaborator.id
+            # 自己作为请求方的等待：backlog + 本时隙已累积的传输时间（全双工取max）
+            # 注意：按协作者ID查询，因为不同协作者的积压是独立的
+            my_backlog_tx = self._backlog_tx_uav_uav_as_requester.get(collaborator_id, 0.0)
+            my_backlog_rx = self._backlog_rx_uav_uav_as_requester.get(collaborator_id, 0.0)
+            my_current_tx = self._tx_time_uav_uav_as_requester.get(collaborator_id, 0.0)
+            my_current_rx = self._rx_time_uav_uav_as_requester.get(collaborator_id, 0.0)
+            self_wait = max(my_backlog_tx + my_current_tx, my_backlog_rx + my_current_rx)
+            # 协作者作为协作者角色的等待：使用协作者「作为协作者」时针对我的积压（FDM并行）
+            my_tx_at_collaborator = self._current_collaborator._tx_time_uav_uav_as_collaborator.get(self.id, 0.0)
+            my_rx_at_collaborator = self._current_collaborator._rx_time_uav_uav_as_collaborator.get(self.id, 0.0)
+            my_backlog_tx_at_collaborator = self._current_collaborator._backlog_tx_uav_uav_as_collaborator.get(self.id, 0.0)
+            my_backlog_rx_at_collaborator = self._current_collaborator._backlog_rx_uav_uav_as_collaborator.get(self.id, 0.0)
+            collaborator_wait = max(my_backlog_tx_at_collaborator + my_tx_at_collaborator,
+                                    my_backlog_rx_at_collaborator + my_rx_at_collaborator)
+            # 双方都准备好才能开始，取最大值
+            queue_wait_uav_uav = max(self_wait, collaborator_wait)
+            
             if self._current_collaborator.cache[req_id]:
-                # Served by collaborator
-                ue.latency_current_request = ue_assoc_uav_latency + uav_uav_latency
+                # Served by collaborator: 协作UAV缓存命中
+                # 自己作为请求方：同一协作者的多个请求串行排队
+                if collaborator_id not in self._tx_time_uav_uav_as_requester:
+                    self._tx_time_uav_uav_as_requester[collaborator_id] = 0.0
+                    self._rx_time_uav_uav_as_requester[collaborator_id] = 0.0
+                self._tx_time_uav_uav_as_requester[collaborator_id] += uav_uav_request_latency
+                self._rx_time_uav_uav_as_requester[collaborator_id] += uav_uav_data_latency
+                # 协作者侧：不同请求方通过FDM并行（带宽已在_set_rates中分割），同一请求方的多个请求串行排队
+                if self.id not in self._current_collaborator._rx_time_uav_uav_as_collaborator:
+                    self._current_collaborator._rx_time_uav_uav_as_collaborator[self.id] = 0.0
+                    self._current_collaborator._tx_time_uav_uav_as_collaborator[self.id] = 0.0
+                self._current_collaborator._rx_time_uav_uav_as_collaborator[self.id] += uav_uav_request_latency
+                self._current_collaborator._tx_time_uav_uav_as_collaborator[self.id] += uav_uav_data_latency
+                
+                ue.latency_current_request = (ue_uav_transmission_time +
+                                              uav_uav_transmission_time + queue_wait_uav_uav)
             else:
-                # Served by MBS through collaborator
-                uav_mbs_latency = file_size / self._current_collaborator._uav_mbs_rate
-                ue.latency_current_request = ue_assoc_uav_latency + uav_uav_latency + uav_mbs_latency
+                # Served by MBS through collaborator: 需要从MBS获取
+                # === 协作UAV ↔ MBS 链路 ===
+                # 上行请求：UAV → MBS，使用 UAV 发射功率
+                uav_mbs_request_latency = request_size_bits / self._current_collaborator._uav_mbs_uplink_rate
+                # 下行数据：MBS → UAV，使用 MBS 发射功率
+                uav_mbs_data_latency = file_size_bits / self._current_collaborator._uav_mbs_downlink_rate
+                uav_mbs_transmission_time = uav_mbs_request_latency + uav_mbs_data_latency
+                
+                # 该链路的排队等待时间（全双工 + 本时隙内排队）
+                queue_wait_uav_mbs = max(self._current_collaborator._backlog_tx_uav_mbs + self._current_collaborator._tx_time_uav_mbs,
+                                         self._current_collaborator._backlog_rx_uav_mbs + self._current_collaborator._rx_time_uav_mbs)
+                
+                # 自己作为请求方 UAV-UAV：同一协作者的多个请求串行排队
+                if collaborator_id not in self._tx_time_uav_uav_as_requester:
+                    self._tx_time_uav_uav_as_requester[collaborator_id] = 0.0
+                    self._rx_time_uav_uav_as_requester[collaborator_id] = 0.0
+                self._tx_time_uav_uav_as_requester[collaborator_id] += uav_uav_request_latency
+                self._rx_time_uav_uav_as_requester[collaborator_id] += uav_uav_data_latency
+                # 协作者侧 UAV-UAV：不同请求方通过FDM并行，同一请求方的多个请求串行排队
+                if self.id not in self._current_collaborator._rx_time_uav_uav_as_collaborator:
+                    self._current_collaborator._rx_time_uav_uav_as_collaborator[self.id] = 0.0
+                    self._current_collaborator._tx_time_uav_uav_as_collaborator[self.id] = 0.0
+                self._current_collaborator._rx_time_uav_uav_as_collaborator[self.id] += uav_uav_request_latency
+                self._current_collaborator._tx_time_uav_uav_as_collaborator[self.id] += uav_uav_data_latency
+                # 协作者 UAV-MBS：发送请求 + 接收数据（点对点链路，串行累加）
+                self._current_collaborator._tx_time_uav_mbs += uav_mbs_request_latency
+                self._current_collaborator._rx_time_uav_mbs += uav_mbs_data_latency
+                
+                ue.latency_current_request = (ue_uav_transmission_time +
+                                              uav_uav_transmission_time + queue_wait_uav_uav +
+                                              uav_mbs_transmission_time + queue_wait_uav_mbs)
                 _try_add_file_to_cache(self._current_collaborator, req_id)
             _try_add_file_to_cache(self, req_id)
         else:
-            # Offload to MBS directly
-            uav_mbs_latency = file_size / self._uav_mbs_rate
-            ue.latency_current_request = ue_assoc_uav_latency + uav_mbs_latency
+            # Offload to MBS directly: 直接从MBS获取
+            # === UAV ↔ MBS 链路 ===
+            # 上行请求：UAV → MBS，使用 UAV 发射功率
+            uav_mbs_request_latency = request_size_bits / self._uav_mbs_uplink_rate
+            # 下行数据：MBS → UAV，使用 MBS 发射功率
+            uav_mbs_data_latency = file_size_bits / self._uav_mbs_downlink_rate
+            uav_mbs_transmission_time = uav_mbs_request_latency + uav_mbs_data_latency
+            
+            # 该链路的排队等待时间（全双工 + 本时隙内排队）
+            queue_wait_uav_mbs = max(self._backlog_tx_uav_mbs + self._tx_time_uav_mbs,
+                                     self._backlog_rx_uav_mbs + self._rx_time_uav_mbs)
+            
+            # UAV-MBS：发送请求 + 接收数据（点对点链路，串行累加）
+            self._tx_time_uav_mbs += uav_mbs_request_latency
+            self._rx_time_uav_mbs += uav_mbs_data_latency
+            
+            ue.latency_current_request = (ue_uav_transmission_time +
+                                          uav_mbs_transmission_time + queue_wait_uav_mbs)
             _try_add_file_to_cache(self, req_id)
 
     def update_ema_and_cache(self) -> None:
@@ -209,8 +392,107 @@ class UAV:
                 break
 
     def update_energy_consumption(self) -> None:
-        """Update UAV energy consumption for the current time slot."""
+        """Update UAV energy consumption for the current time slot.
+        
+        跨时隙传输模型:
+        - 每时隙最多通信 1 秒，超出部分积压到下一时隙
+        - 发送和接收分别计算积压
+        
+        能耗 = 飞行能耗 + 通信能耗
+        - 飞行能耗：移动 + 悬停，占满整个时隙
+        - 通信能耗：发送功率 × 发送时间 + 接收功率 × 接收时间
+        """
+        # 1. 飞行能耗（移动 + 悬停，占满整个时隙）
         time_moving = self._dist_moved / config.UAV_SPEED
         time_hovering = config.TIME_SLOT_DURATION - time_moving
         fly_energy = config.POWER_MOVE * time_moving + config.POWER_HOVER * time_hovering
-        self._energy_current_slot += fly_energy
+        
+        # 2. 通信能耗（分别计算发送和接收，每时隙最多 1 秒）
+        # UE-UAV 链路
+        total_tx_ue_uav = self._backlog_tx_ue_uav + self._tx_time_ue_uav
+        actual_tx_ue_uav = min(total_tx_ue_uav, config.TIME_SLOT_DURATION)
+        self._backlog_tx_ue_uav = max(0.0, total_tx_ue_uav - config.TIME_SLOT_DURATION)
+        
+        total_rx_ue_uav = self._backlog_rx_ue_uav + self._rx_time_ue_uav
+        actual_rx_ue_uav = min(total_rx_ue_uav, config.TIME_SLOT_DURATION)
+        self._backlog_rx_ue_uav = max(0.0, total_rx_ue_uav - config.TIME_SLOT_DURATION)
+        
+        # UAV-UAV 链路 - 作为请求方（按协作者ID分组处理积压）
+        # 注意：作为请求方时，不同协作者的链路是独立的，各自有独立的时隙限制
+        energy_tx_requester = 0.0  # 能耗计算用（累加）
+        energy_rx_requester = 0.0
+        all_collaborator_ids_tx = set(self._backlog_tx_uav_uav_as_requester.keys()) | set(self._tx_time_uav_uav_as_requester.keys())
+        for collab_id in all_collaborator_ids_tx:
+            backlog_tx = self._backlog_tx_uav_uav_as_requester.get(collab_id, 0.0)
+            current_tx = self._tx_time_uav_uav_as_requester.get(collab_id, 0.0)
+            total_tx = backlog_tx + current_tx
+            actual_tx = min(total_tx, config.TIME_SLOT_DURATION)
+            energy_tx_requester += actual_tx
+            self._backlog_tx_uav_uav_as_requester[collab_id] = max(0.0, total_tx - config.TIME_SLOT_DURATION)
+        
+        all_collaborator_ids_rx = set(self._backlog_rx_uav_uav_as_requester.keys()) | set(self._rx_time_uav_uav_as_requester.keys())
+        for collab_id in all_collaborator_ids_rx:
+            backlog_rx = self._backlog_rx_uav_uav_as_requester.get(collab_id, 0.0)
+            current_rx = self._rx_time_uav_uav_as_requester.get(collab_id, 0.0)
+            total_rx = backlog_rx + current_rx
+            actual_rx = min(total_rx, config.TIME_SLOT_DURATION)
+            energy_rx_requester += actual_rx
+            self._backlog_rx_uav_uav_as_requester[collab_id] = max(0.0, total_rx - config.TIME_SLOT_DURATION)
+        
+        # 清理已完成的积压条目
+        self._backlog_tx_uav_uav_as_requester = {k: v for k, v in self._backlog_tx_uav_uav_as_requester.items() if v > 0}
+        self._backlog_rx_uav_uav_as_requester = {k: v for k, v in self._backlog_rx_uav_uav_as_requester.items() if v > 0}
+        
+        # UAV-UAV 链路 - 作为协作者（FDM并行，按请求方分组处理积压）
+        # 总功率限制模型：FDM 并行传输共享同一功放，能耗时间取 max
+        max_tx_collaborator = 0.0  # 能耗计算用（取max）
+        max_rx_collaborator = 0.0
+        all_requester_ids = set(self._backlog_tx_uav_uav_as_collaborator.keys()) | set(self._tx_time_uav_uav_as_collaborator.keys())
+        for req_id in all_requester_ids:
+            backlog_tx = self._backlog_tx_uav_uav_as_collaborator.get(req_id, 0.0)
+            current_tx = self._tx_time_uav_uav_as_collaborator.get(req_id, 0.0)
+            total_tx = backlog_tx + current_tx
+            actual_tx = min(total_tx, config.TIME_SLOT_DURATION)
+            max_tx_collaborator = max(max_tx_collaborator, actual_tx)
+            self._backlog_tx_uav_uav_as_collaborator[req_id] = max(0.0, total_tx - config.TIME_SLOT_DURATION)
+        
+        all_requester_ids_rx = set(self._backlog_rx_uav_uav_as_collaborator.keys()) | set(self._rx_time_uav_uav_as_collaborator.keys())
+        for req_id in all_requester_ids_rx:
+            backlog_rx = self._backlog_rx_uav_uav_as_collaborator.get(req_id, 0.0)
+            current_rx = self._rx_time_uav_uav_as_collaborator.get(req_id, 0.0)
+            total_rx = backlog_rx + current_rx
+            actual_rx = min(total_rx, config.TIME_SLOT_DURATION)
+            max_rx_collaborator = max(max_rx_collaborator, actual_rx)
+            self._backlog_rx_uav_uav_as_collaborator[req_id] = max(0.0, total_rx - config.TIME_SLOT_DURATION)
+        
+        # 清理已完成的积压条目（积压为0的可以移除）
+        self._backlog_tx_uav_uav_as_collaborator = {k: v for k, v in self._backlog_tx_uav_uav_as_collaborator.items() if v > 0}
+        self._backlog_rx_uav_uav_as_collaborator = {k: v for k, v in self._backlog_rx_uav_uav_as_collaborator.items() if v > 0}
+        
+        # UAV-UAV 能耗时间：
+        # - 作为请求方：通常只有一个协作者，直接累加
+        # - 作为协作者：FDM 并行共享功放，取 max
+        energy_tx_uav_uav = energy_tx_requester + max_tx_collaborator
+        energy_rx_uav_uav = energy_rx_requester + max_rx_collaborator
+        
+        # UAV-MBS 链路
+        total_tx_uav_mbs = self._backlog_tx_uav_mbs + self._tx_time_uav_mbs
+        actual_tx_uav_mbs = min(total_tx_uav_mbs, config.TIME_SLOT_DURATION)
+        self._backlog_tx_uav_mbs = max(0.0, total_tx_uav_mbs - config.TIME_SLOT_DURATION)
+        
+        total_rx_uav_mbs = self._backlog_rx_uav_mbs + self._rx_time_uav_mbs
+        actual_rx_uav_mbs = min(total_rx_uav_mbs, config.TIME_SLOT_DURATION)
+        self._backlog_rx_uav_mbs = max(0.0, total_rx_uav_mbs - config.TIME_SLOT_DURATION)
+        
+        # 通信能耗计算
+        # 假设：不同频段（UE-UAV、UAV-UAV、UAV-MBS）使用独立的射频前端，各自有独立的功率预算
+        # - UE-UAV 链路：使用 BANDWIDTH_EDGE，OFDMA 并行取 max
+        # - UAV-UAV 链路：使用 BANDWIDTH_INTER，FDM 并行取 max（协作者侧）
+        # - UAV-MBS 链路：使用 BANDWIDTH_BACKHAUL，点对点
+        # 不同频段的能耗时间累加（独立射频前端）
+        total_tx_time = actual_tx_ue_uav + energy_tx_uav_uav + actual_tx_uav_mbs
+        total_rx_time = actual_rx_ue_uav + energy_rx_uav_uav + actual_rx_uav_mbs
+        comm_energy = (config.TRANSMIT_POWER * total_tx_time + 
+                       config.RECEIVE_POWER * total_rx_time)
+        
+        self._energy_current_slot = fly_energy + comm_energy

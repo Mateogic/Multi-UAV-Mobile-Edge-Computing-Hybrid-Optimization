@@ -48,51 +48,14 @@ def plot_snapshot(env: Env, progress_step: int, save_dir: str) -> None:
     plt.close(fig)
 
 
-def generate_random_actions(env: Env, max_retries: int = 20) -> np.ndarray:
+def generate_random_actions(num_uavs: int) -> np.ndarray:
     """
-    Generates a valid random action for each UAV, now with collision avoidance.
-    It sequentially generates an action for each UAV, ensuring the new position
-    respects the minimum separation distance from other UAVs' new positions.
+    Generates random action vectors in [-1, 1] range for each UAV.
+    
+    Note: Collision avoidance is now handled by env._apply_actions_to_env(),
+    so we only need to generate simple random actions here.
     """
-    actions_raw: list[np.ndarray] = []
-    new_positions: list[np.ndarray] = []  # Store the intended new (x, y) positions of UAVs
-    max_dist: float = config.UAV_SPEED * config.TIME_SLOT_DURATION
-
-    for uav in env.uavs:
-        current_pos: np.ndarray = uav.pos[:2]
-
-        for _ in range(max_retries):
-            # Step 1: Generate a candidate random move
-            angle: float = np.random.uniform(0, 2 * np.pi)
-            dist: float = np.random.uniform(0, max_dist)
-
-            candidate_x: float = current_pos[0] + dist * np.cos(angle)
-            candidate_y: float = current_pos[1] + dist * np.sin(angle)
-
-            # Ensure the UAV stays within the simulation area boundaries
-            candidate_x = np.clip(candidate_x, 0, config.AREA_WIDTH)
-            candidate_y = np.clip(candidate_y, 0, config.AREA_HEIGHT)
-            candidate_pos: np.ndarray = np.array([candidate_x, candidate_y])
-
-            # Step 2: Check for collision with previously decided moves for other UAVs
-            is_valid: bool = True
-            for other_new_pos in new_positions:
-                if np.linalg.norm(candidate_pos - other_new_pos) < config.MIN_UAV_SEPARATION:
-                    is_valid = False
-                    break  # Collision detected, try a new random move
-
-            if is_valid:
-                # Step 3: If the move is valid, accept it and break the retry loop
-                new_positions.append(candidate_pos)
-                actions_raw.append(candidate_pos)
-                break
-
-        else:  # This 'else' triggers if the 'for' loop completes without a 'break'
-            # Step 4: If no valid move was found, the UAV stays in its current position
-            new_positions.append(current_pos)
-            actions_raw.append(current_pos)
-    actions: np.ndarray = np.array(actions_raw)
-    return actions
+    return np.random.uniform(-1, 1, (num_uavs, config.ACTION_DIM))
 
 
 def main() -> None:
@@ -101,10 +64,10 @@ def main() -> None:
     if not os.path.exists(vis_dir):
         os.makedirs(vis_dir)
         print(f"Created directory: {vis_dir}")
-    print("Starting simulation with random actions (with collision avoidance)...")
+    print("Starting simulation with random actions...")
     for t in range(config.STEPS_PER_EPISODE):
-        actions: np.ndarray = generate_random_actions(env)
-        env.step(actions, visualize=True)
+        actions: np.ndarray = generate_random_actions(config.NUM_UAVS)
+        env.step(actions)
         if t % 50 == 0:
             plot_snapshot(env, t, vis_dir)
             print(f"Saved frame for time step {t}")
